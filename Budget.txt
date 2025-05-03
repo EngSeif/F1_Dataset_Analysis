@@ -1,0 +1,171 @@
+from scipy.stats import pearsonr
+
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import statsmodels.api as sm
+import pingouin as pg
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+from mpl_toolkits.mplot3d import Axes3D
+
+# 1. Load and prepare data
+df = pd.read_excel('F1_Budget_Enhanced_Correlation.xlsx')
+df = df.dropna(subset=['Season Budget (M$)', 'Avg Qualifying Position', 'Horsepower (HP)', 'Engine Manufacturer'])
+df[['Season Budget (M$)', 'Avg Qualifying Position', 'Horsepower (HP)']] = df[['Season Budget (M$)', 'Avg Qualifying Position', 'Horsepower (HP)']].astype(float)
+
+# Add interaction term for ML
+df['Budget_HP_Interaction'] = (df['Season Budget (M$)'] / 100) * (df['Horsepower (HP)'] / 10)
+
+# 2. Descriptive Statistics
+print("=== Key Statistics ===")
+print(df[['Season Budget (M$)', 'Avg Qualifying Position']].describe().round(2))
+print("\n=== Engine Distribution ===")
+print(df['Engine Manufacturer'].value_counts())
+
+# 3. Correlation Heatmap
+plt.figure(figsize=(10,6))
+corr_matrix = df[['Season Budget (M$)', 'Avg Qualifying Position', 'Horsepower (HP)']].corr()
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f", center=0)
+plt.title("Budget-Performance Correlations")
+plt.tight_layout()
+plt.savefig('correlation_heatmap.png', dpi=300)
+plt.show()
+
+# 4. Pairplot 
+sns.pairplot(df, 
+             vars=['Horsepower (HP)', 'Avg Qualifying Position', 'Season Budget (M$)'],
+             hue='Engine Manufacturer',
+             palette='viridis',
+             plot_kws={'alpha':0.7})
+plt.suptitle("Pairplot of Key Variables by Engine Manufacturer", y=1.02)
+plt.savefig('pairplot_engine.png', dpi=300)
+plt.show()
+
+# 5. Engine-specific regression plots 
+g = sns.FacetGrid(df, col="Engine Manufacturer", col_wrap=2, height=4, sharex=False, sharey=False)
+g.map_dataframe(sns.regplot, x='Horsepower (HP)', y='Avg Qualifying Position', 
+                scatter_kws={'alpha':0.7}, line_kws={'color':'red'})
+g.set_axis_labels("Horsepower (HP)", "Avg Qualifying Position")
+g.set_titles("{col_name} Engine")
+plt.suptitle("Regression of Qualifying Position vs Horsepower by Engine", y=1.02)
+plt.savefig('engine_specific_regression.png', dpi=300)
+plt.show()
+
+# 6. Partial regression plot 
+def partial_residual(x, y, covar):
+    model_x = LinearRegression().fit(covar.values.reshape(-1,1), x)
+    res_x = x - model_x.predict(covar.values.reshape(-1,1))
+    model_y = LinearRegression().fit(covar.values.reshape(-1,1), y)
+    res_y = y - model_y.predict(covar.values.reshape(-1,1))
+    return res_x, res_y
+
+# Primary variable is now budget, controlling for horsepower
+res_budget, res_qual = partial_residual(df['Season Budget (M$)'], 
+                                        df['Avg Qualifying Position'],
+                                        df['Horsepower (HP)'])
+
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+sns.regplot(x=res_budget, y=res_qual, scatter_kws={'alpha':0.7}, line_kws={'color':'red'})
+plt.title("Partial Regression Plot (Controlling for Horsepower)\nr = {:.2f}".format(np.corrcoef(res_budget, res_qual)[0,1]))
+plt.xlabel("Budget (M$) | Horsepower")
+plt.ylabel("Qualifying Position | Horsepower")
+
+# 7. 3D relationship plot 
+ax = plt.subplot(1,2,2, projection='3d')
+colors = pd.factorize(df['Engine Manufacturer'])[0]
+sc = ax.scatter(df['Horsepower (HP)'], df['Season Budget (M$)'], df['Avg Qualifying Position'],
+           c=colors, cmap='viridis', alpha=0.8)
+ax.set_xlabel('Horsepower (HP)')
+ax.set_ylabel('Budget (M$)')
+ax.set_zlabel('Qualifying Position')
+plt.title("3D Relationship Analysis")
+plt.tight_layout()
+plt.savefig('partial_and_3d_analysis.png', dpi=300)
+plt.show()
+
+# 8. Budget Tiers Analysis
+df['Budget_Tier'] = pd.qcut(df['Season Budget (M$)'], 3, labels=['Low', 'Medium', 'High'])
+plt.figure(figsize=(10,6))
+sns.boxplot(x='Budget_Tier', y='Avg Qualifying Position', data=df)
+plt.title('Qualifying Performance by Budget Tier\n(Lower Position = Better)')
+plt.xlabel('Budget Category')
+plt.ylabel('Average Qualifying Position')
+plt.savefig('budget_tiers.png', dpi=300)
+plt.show()
+
+# 9. Advanced Regression Analysis
+X = sm.add_constant(df[['Season Budget (M$)', 'Horsepower (HP)']])
+y = df['Avg Qualifying Position']
+model = sm.OLS(y, X).fit()
+print("\n=== Regression Results ===")
+print(model.summary())
+print("\n95% Confidence Intervals:")
+print(model.conf_int().rename(columns={0: 'Lower', 1: 'Upper'}).round(3))
+
+# 10. Engine Manufacturer ANOVA
+print("\n=== Engine Manufacturer ANOVA ===")
+anova = pg.anova(data=df, dv='Avg Qualifying Position', between='Engine Manufacturer')
+print(anova.round(4))
+
+# 11. Residual Diagnostics
+fig, ax = plt.subplots(1,2, figsize=(12,5))
+sns.residplot(x=model.predict(), y=model.resid, lowess=True, ax=ax[0])
+ax[0].set_title('Residuals vs Fitted')
+sm.qqplot(model.resid, line='s', ax=ax[1])
+ax[1].set_title('Q-Q Plot')
+plt.tight_layout()
+plt.savefig('residual_checks.png', dpi=300)
+plt.show()
+
+# 12. Machine Learning Feature Importance
+rf = RandomForestRegressor(n_estimators=200, random_state=42)
+features = ['Season Budget (M$)', 'Horsepower (HP)', 'Budget_HP_Interaction']
+X_rf = df[features]
+y_rf = df['Avg Qualifying Position']
+rf.fit(X_rf, y_rf)
+
+plt.figure(figsize=(8,4))
+plt.barh(features, rf.feature_importances_, color='darkred')
+plt.title('Feature Importance in Qualifying Performance')
+plt.xlabel('Importance Score')
+plt.tight_layout()
+plt.savefig('feature_importance.png', dpi=300)
+plt.show()
+
+# 13. Temporal Analysis
+plt.figure(figsize=(12,6))
+budget_trend = df.groupby('Season')['Season Budget (M$)'].mean()
+qual_trend = df.groupby('Season')['Avg Qualifying Position'].mean()
+
+ax = budget_trend.plot(color='blue', marker='o', label='Average Budget')
+ax.set_ylabel('Budget (M$)', color='blue')
+ax.tick_params(axis='y', labelcolor='blue')
+
+ax2 = ax.twinx()
+qual_trend.plot(color='red', marker='s', ax=ax2, label='Qualifying Position')
+ax2.set_ylabel('Avg Qualifying Position', color='red')
+ax2.tick_params(axis='y', labelcolor='red')
+ax2.invert_yaxis()
+
+plt.title('Budget vs Performance Trends (2019-2025)')
+plt.grid(True, alpha=0.3)
+plt.savefig('temporal_trends.png', dpi=300)
+plt.show()
+
+# 14. Comprehensive Hypothesis Testing
+print("\n=== Statistical Tests ===")
+r, p = pearsonr(df['Season Budget (M$)'], df['Avg Qualifying Position'])
+print(f"Pearson Correlation: r = {r:.3f}, p = {p:.4f}")
+
+def bootstrap_ci(data, n=1000):
+    corrs = []
+    for _ in range(n):
+        sample = data.sample(frac=1, replace=True)
+        corrs.append(sample['Season Budget (M$)'].corr(sample['Avg Qualifying Position']))
+    return np.percentile(corrs, [2.5, 97.5])
+
+ci = bootstrap_ci(df)
+print(f"Bootstrapped 95% CI: [{ci[0]:.3f}, {ci[1]:.3f}]")
